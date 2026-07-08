@@ -1,0 +1,27 @@
+{
+  "convert_all_text_reply": {
+    "description": "将普通文本回复自动转换为懒羊羊主题图片",
+    "type": "bool",
+    "default": true
+  },
+  "direct_menu_keywords": {
+    "description": "无需唤醒词即可触发菜单的关键词",
+    "type": "list",
+    "default": ["菜单", "帮助", "懒羊羊菜单"]
+  },
+  "voice_trigger_keywords": {
+    "description": "触发偶发语音/回怼的关键词",
+    "type": "list",
+    "default": ["懒羊羊回家"]
+  },
+  "voice_reply_chance": {
+    "description": "触发语音或回怼的概率，0 到 1",
+    "type": "float",
+    "default": 0.35
+  },
+  "voice_fallback_roasts": {
+    "description": "voices 目录没有 wav/mp3/amr/silk 语音时使用的图片回怼文案",
+    "type": "list",
+    "default": ["叫我回家？我才刚躺下。", "你先回，我再睡五分钟。", "别催，懒羊羊正在缓慢加载。"]
+  }
+}

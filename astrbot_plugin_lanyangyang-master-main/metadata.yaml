@@ -1,0 +1,6 @@
+name: astrbot_plugin_lanyangyang
+display_name: 懒羊羊主题群管
+desc: 懒羊羊主题头像图片回复、群管白名单、发言统计、邀请排行、点歌与语音回复
+version: v1.1.0
+author: Codex
+repo: https://github.com/yourname/astrbot_plugin_lanyangyang
