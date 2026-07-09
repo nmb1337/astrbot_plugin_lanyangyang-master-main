@@ -17,6 +17,11 @@ from astrbot.api.star import Context, Star, register
 import astrbot.api.message_components as Comp
 
 try:
+    import websockets
+except Exception:  # pragma: no cover - optional direct NapCat path
+    websockets = None
+
+try:
     from PIL import Image, ImageDraw, ImageFont, ImageOps
 except Exception:  # pragma: no cover - handled at runtime inside _render_card
     Image = None
@@ -301,11 +306,12 @@ class LanYangYangGroupManager(Star):
     @filter.command("头衔", alias={"改头衔"})
     async def set_special_title(self, event: AstrMessageEvent):
         target = self._extract_target_user(event)
-        yield await self._set_title_result(event, target, self._clean_command_text(event, target))
+        yield await self._set_title_result(event, target, self._clean_title_text(event, target))
 
     @filter.command("申请头衔")
     async def apply_special_title(self, event: AstrMessageEvent):
-        yield await self._set_title_result(event, (str(event.get_sender_id()), event.get_sender_name()), self._clean_command_text(event))
+        target = (str(event.get_sender_id()), event.get_sender_name())
+        yield await self._set_title_result(event, target, self._clean_title_text(event, target))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("上管")
@@ -480,14 +486,18 @@ class LanYangYangGroupManager(Star):
         group_id = self._group_id(event)
         if not group_id or not target or not title:
             return await self._image_result(event, "头衔", ["用法：头衔 新头衔 @群友，或 申请头衔 新头衔"])
-        ok, msg = await self._onebot_call(
+        title = title[:18].strip()
+        ok, msg = await self._set_group_special_title(
             event,
-            "set_group_special_title",
-            group_id=int(group_id),
-            user_id=int(target[0]),
-            special_title=title,
-            duration=0,
+            group_id,
+            target,
+            title,
         )
+        if ok:
+            verified, verify_msg = await self._verify_special_title(event, group_id, target, title)
+            if not verified:
+                return await self._image_result(event, "头衔失败", [f"{target[1] or target[0]}：{title}", verify_msg])
+            msg = verify_msg
         return await self._image_result(event, "头衔结果", [f"{target[1] or target[0]}：{title}", msg] if ok else [msg])
 
     async def _set_admin_result(self, event: AstrMessageEvent, enable: bool):
@@ -874,7 +884,7 @@ class LanYangYangGroupManager(Star):
 
     async def _set_title_direct(self, event: AstrMessageEvent):
         target = self._extract_target_user(event)
-        return await self._set_title_result(event, target, self._clean_command_text(event, target))
+        return await self._set_title_result(event, target, self._clean_title_text(event, target))
 
     async def _unmute_result(self, event: AstrMessageEvent):
         group_id = self._group_id(event)
@@ -1557,6 +1567,50 @@ class LanYangYangGroupManager(Star):
             logger.exception("OneBot API 调用失败：%s", action)
             return False, self._format_onebot_error(exc)
 
+    async def _set_group_special_title(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        target: tuple[str, str],
+        title: str,
+    ) -> tuple[bool, str]:
+        payload = {
+            "group_id": int(group_id),
+            "user_id": int(target[0]),
+            "special_title": title,
+            "duration": 0,
+        }
+        if self._bool_config("special_title_use_napcat_ws", True):
+            ok, result = await self._napcat_call_raw("set_group_special_title", **payload)
+            if ok:
+                return True, "操作完成。"
+            logger.warning("NapCat WebSocket 设置群头衔失败：%s", result)
+            return False, f"NapCat WebSocket 设置群头衔失败：{result}"
+        return await self._onebot_call(event, "set_group_special_title", **payload)
+
+    async def _napcat_call_raw(self, action: str, **payload) -> tuple[bool, Any]:
+        if websockets is None:
+            return False, "未安装 websockets，无法直连 NapCat。"
+        ws_url = str(self.config.get("napcat_ws_url", "ws://127.0.0.1:3001") or "ws://127.0.0.1:3001")
+        echo = f"lanyangyang_{action}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+        try:
+            async with websockets.connect(ws_url) as ws:
+                await ws.send(json.dumps({
+                    "action": action,
+                    "params": payload,
+                    "echo": echo,
+                }, ensure_ascii=False))
+                while True:
+                    data = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                    if data.get("echo") != echo:
+                        continue
+                    if data.get("status") == "ok" and int(data.get("retcode", 0) or 0) == 0:
+                        return True, data.get("data")
+                    return False, str(data.get("wording") or data.get("message") or data)
+        except Exception as exc:
+            logger.exception("NapCat WebSocket 调用失败：%s", action)
+            return False, str(exc)
+
     def _format_onebot_error(self, exc: Exception) -> str:
         retcode = getattr(exc, "retcode", None)
         wording = getattr(exc, "wording", None) or getattr(exc, "message", None)
@@ -1566,6 +1620,31 @@ class LanYangYangGroupManager(Star):
         if retcode:
             return f"OneBot 返回失败：{text}（retcode={retcode}）"
         return f"OneBot 返回失败：{text}"
+
+    async def _verify_special_title(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        target: tuple[str, str],
+        expected_title: str,
+    ) -> tuple[bool, str]:
+        last_actual = ""
+        for attempt in range(6):
+            ok, info = await self._onebot_call_raw(
+                event,
+                "get_group_member_info",
+                group_id=int(group_id),
+                user_id=int(target[0]),
+                no_cache=True,
+            )
+            if not ok or not isinstance(info, dict):
+                return False, "已调用设置接口，但无法回查头衔是否生效。"
+            last_actual = str(info.get("title") or "")
+            if last_actual == expected_title:
+                return True, "操作完成，已确认头衔生效。"
+            if attempt < 5:
+                await asyncio.sleep(1)
+        return False, f"已调用设置接口，但回查头衔仍为“{last_actual or '空'}”，未确认生效。"
 
     async def _ensure_group_member(
         self,
@@ -1732,6 +1811,24 @@ class LanYangYangGroupManager(Star):
             if qq:
                 text = text.replace(str(qq), " ")
         return re.sub(r"\s+", " ", text).strip()
+
+    def _clean_title_text(self, event: AstrMessageEvent, target: tuple[str, str] | None = None) -> str:
+        text = self._command_args(event)
+        text = re.sub(r"\[CQ:(?:at|reply),[^\]]+\]", " ", text)
+        if target:
+            uid, name = target
+            text = re.sub(rf"(?<!\d){re.escape(str(uid))}(?!\d)", " ", text)
+            if name:
+                text = text.replace(f"@{name}", " ")
+                text = text.replace(name, " ")
+        for item in event.get_messages():
+            qq = getattr(item, "qq", None)
+            if qq:
+                text = re.sub(rf"(?<!\d){re.escape(str(qq))}(?!\d)", " ", text)
+        text = re.sub(r"@\S+", " ", text)
+        text = re.sub(r"\b\d{5,12}\b", " ", text)
+        text = re.sub(r"\s+", " ", text).strip(" ：:，,")
+        return text
 
     def _current_message_id(self, event: AstrMessageEvent) -> str | None:
         for attr in ("message_id", "id", "seq"):

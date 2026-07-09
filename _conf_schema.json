@@ -23,5 +23,15 @@
     "description": "voices 目录没有 wav/mp3/amr/silk 语音时使用的图片回怼文案",
     "type": "list",
     "default": ["叫我回家？我才刚躺下。", "你先回，我再睡五分钟。", "别催，懒羊羊正在缓慢加载。"]
+  },
+  "special_title_use_napcat_ws": {
+    "description": "设置群头衔时优先直连 NapCat WebSocket，避免部分 AstrBot OneBot 通道把中文头衔写成问号",
+    "type": "bool",
+    "default": true
+  },
+  "napcat_ws_url": {
+    "description": "NapCat WebSocket 地址，用于设置群头衔",
+    "type": "string",
+    "default": "ws://127.0.0.1:3001"
   }
 }
