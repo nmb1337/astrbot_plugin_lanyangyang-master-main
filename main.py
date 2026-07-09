@@ -827,7 +827,11 @@ class LanYangYangGroupManager(Star):
             "改我": lambda: self._set_card_result(event, (str(event.get_sender_id()), event.get_sender_name()), self._clean_command_text(event)),
             "头衔": lambda: self._set_title_direct(event),
             "改头衔": lambda: self._set_title_direct(event),
-            "申请头衔": lambda: self._set_title_result(event, (str(event.get_sender_id()), event.get_sender_name()), self._clean_command_text(event)),
+            "申请头衔": lambda: self._set_title_result(
+                event,
+                (str(event.get_sender_id()), event.get_sender_name()),
+                self._clean_title_text(event, (str(event.get_sender_id()), event.get_sender_name())),
+            ),
             "上管": lambda: self._set_admin_result(event, True),
             "授权": lambda: self._set_admin_result(event, True),
             "发权": lambda: self._set_admin_result(event, True),
@@ -1826,6 +1830,7 @@ class LanYangYangGroupManager(Star):
             if qq:
                 text = re.sub(rf"(?<!\d){re.escape(str(qq))}(?!\d)", " ", text)
         text = re.sub(r"@\S+", " ", text)
+        text = re.sub(r"\s*[（(]\s*[）)]\s*", " ", text)
         text = re.sub(r"\b\d{5,12}\b", " ", text)
         text = re.sub(r"\s+", " ", text).strip(" ：:，,")
         return text
