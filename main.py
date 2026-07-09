@@ -1,3 +1,4 @@
+import asyncio
 import json
 import hashlib
 import random
@@ -7,8 +8,8 @@ import uuid
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
-from urllib.request import urlopen
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import Request, urlopen
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -56,6 +57,9 @@ class LanYangYangGroupManager(Star):
         await self._record_invite_from_raw(event)
 
         text = (event.message_str or "").strip()
+        if self._should_pass_to_other_plugin(text):
+            return
+
         direct_result = await self._direct_result(event, text)
         if direct_result:
             yield direct_result
@@ -133,7 +137,7 @@ class LanYangYangGroupManager(Star):
             ]
         yield await self._image_result(event, "我的发言统计", lines)
 
-    @filter.command("邀请排行", alias={"邀请榜"})
+    @filter.command("邀请排行", alias={"邀请榜", "邀请统计"})
     async def invite_rank(self, event: AstrMessageEvent):
         """查看本群邀请排行。"""
         group_id = self._group_id(event)
@@ -185,6 +189,10 @@ class LanYangYangGroupManager(Star):
         if not group_id or not target:
             yield await self._image_result(event, "禁言", ["用法：禁言 @成员 10m"])
             return
+        valid, validation_msg = await self._ensure_group_member(event, group_id, target)
+        if not valid:
+            yield await self._image_result(event, "禁言结果", [validation_msg])
+            return
         ok, msg = await self._onebot_call(
             event,
             "set_group_ban",
@@ -203,6 +211,10 @@ class LanYangYangGroupManager(Star):
         target = self._extract_target_user(event)
         if not group_id or not target:
             yield await self._image_result(event, "解禁", ["用法：解禁 @成员"])
+            return
+        valid, validation_msg = await self._ensure_group_member(event, group_id, target)
+        if not valid:
+            yield await self._image_result(event, "解禁结果", [validation_msg])
             return
         ok, msg = await self._onebot_call(
             event,
@@ -498,6 +510,13 @@ class LanYangYangGroupManager(Star):
         target = self._extract_target_user(event)
         if not group_id or not target:
             return await self._image_result(event, "踢出群", ["用法：踢出群 @成员 或 踢黑 @成员"])
+        valid, validation_msg = await self._ensure_group_member(event, group_id, target)
+        if not valid:
+            return await self._image_result(event, "踢出结果", [validation_msg])
+        role_ok, role_msg = await self._ensure_role_action_allowed(event, group_id, target, "kick")
+        if not role_ok:
+            action = "踢黑" if reject else "踢出"
+            return await self._image_result(event, f"{action}结果", [role_msg])
         ok, msg = await self._onebot_call(
             event,
             "set_group_kick",
@@ -549,6 +568,14 @@ class LanYangYangGroupManager(Star):
         target = self._extract_target_user(event)
         if not group_id or not target:
             return await self._image_result(event, "群管设置", ["用法：上管 @群友，或 下管 @群友"])
+        valid, validation_msg = await self._ensure_group_member(event, group_id, target)
+        if not valid:
+            title = "上管" if enable else "下管"
+            return await self._image_result(event, f"{title}结果", [validation_msg])
+        role_ok, role_msg = await self._ensure_role_action_allowed(event, group_id, target, "admin")
+        if not role_ok:
+            title = "上管" if enable else "下管"
+            return await self._image_result(event, f"{title}结果", [role_msg])
         ok, msg = await self._onebot_call(
             event,
             "set_group_admin",
@@ -689,34 +716,101 @@ class LanYangYangGroupManager(Star):
     async def _music_result(self, event: AstrMessageEvent):
         raw = self._command_args(event).strip()
         source, song_id = self._parse_music_request(raw)
+        song_name = ""
+        artist = ""
+        if raw and not song_id:
+            query = self._extract_music_query(raw, source)
+            if query:
+                found = await self._search_music_song(source, query)
+                if found:
+                    source, song_id, song_name, artist = found
         if not song_id:
             return await self._image_result(
                 event,
                 "点歌",
                 [
-                    "用法：点歌 qq 123456，或 点歌 网易 123456",
-                    "也支持粘贴 music.163.com/song?id=... 链接。",
-                    "歌名搜索依赖协议端，本插件先发送音乐 ID 卡片。",
+                    "用法：点歌 海阔天空，点歌 qq 海阔天空，或 点歌 网易 海阔天空",
+                    "也支持：点歌 qq 123456，点歌 网易 123456。",
+                    "没有搜索到歌曲时，请换关键词或直接发送音乐 ID。",
                 ],
             )
 
-        cq = f"[CQ:music,type={source},id={song_id}]"
-        ok, msg = await self._send_onebot_message(event, cq)
-        if ok:
-            return await self._image_result(event, "点歌", [f"来源：{source}", f"歌曲 ID：{song_id}", "音乐卡片已发送。"])
+        ok, music_status = await self._try_send_music_card(event, source, song_id, song_name, artist)
+        display_name = f"{song_name} - {artist}".strip(" -") if song_name or artist else ""
+        return await self._image_result(
+            event,
+            "点歌",
+            ([f"歌曲：{display_name}"] if display_name else []) + [
+                f"来源：{source}",
+                f"歌曲 ID：{song_id}",
+                music_status if ok else f"发送失败：{music_status}",
+            ],
+        )
 
-        music_cls = getattr(Comp, "Music", None)
-        if music_cls:
-            for kwargs in (
-                {"type": source, "id": song_id},
-                {"platform": source, "id": song_id},
-                {"music_type": source, "id": song_id},
-            ):
-                try:
-                    return event.chain_result([music_cls(**kwargs)])
-                except Exception:
-                    continue
-        return await self._image_result(event, "点歌", [f"发送失败：{msg}", "当前平台可能不支持 OneBot 音乐卡片。"])
+    async def _try_send_music_card(
+        self,
+        event: AstrMessageEvent,
+        source: str,
+        song_id: str,
+        song_name: str = "",
+        artist: str = "",
+    ) -> tuple[bool, str]:
+        if source == "163":
+            segment = {"type": "music", "data": {"type": "163", "id": str(song_id)}}
+            ok, msg = await self._send_onebot_music_segment(event, segment)
+            if ok:
+                return True, "网易云音乐卡片已发送。"
+            logger.warning("网易云音乐 ID 卡片发送失败，尝试 custom 卡片：%s", msg)
+
+        card = self._custom_music_card(source, song_id, song_name, artist)
+        ok, msg = await self._send_onebot_music_segment(event, card)
+        if ok:
+            return True, "音乐卡片已发送。"
+        return False, msg
+
+    async def _send_onebot_music_segment(self, event: AstrMessageEvent, segment: dict):
+        group_id = self._group_id(event)
+        if group_id:
+            return await self._onebot_call(
+                event,
+                "send_group_msg",
+                group_id=int(group_id),
+                message=[segment],
+            )
+        user_id = str(event.get_sender_id() or "")
+        if not user_id:
+            return False, "无法获取接收者。"
+        return await self._onebot_call(
+            event,
+            "send_private_msg",
+            user_id=int(user_id),
+            message=[segment],
+        )
+
+    def _custom_music_card(self, source: str, song_id: str, song_name: str = "", artist: str = "") -> dict:
+        if source == "163":
+            url = f"https://music.163.com/song?id={song_id}"
+            audio = f"https://music.163.com/song/media/outer/url?id={song_id}.mp3"
+            title = song_name or f"网易云音乐 {song_id}"
+            content = artist or "点击打开网易云音乐"
+            image = "https://s1.music.126.net/style/favicon.ico"
+        else:
+            url = f"https://y.qq.com/n/ryqq/songDetail/{song_id}"
+            audio = url
+            title = song_name or f"QQ音乐 {song_id}"
+            content = artist or "点击打开 QQ 音乐"
+            image = "https://y.qq.com/favicon.ico"
+        return {
+            "type": "music",
+            "data": {
+                "type": "custom",
+                "url": url,
+                "audio": audio,
+                "title": title,
+                "content": content,
+                "image": image,
+            },
+        }
 
     async def _image_result(self, event: AstrMessageEvent, title: str, lines: list[str] | str):
         try:
@@ -729,13 +823,14 @@ class LanYangYangGroupManager(Star):
 
     async def _direct_result(self, event: AstrMessageEvent, text: str):
         command = text.strip().lstrip("/")
+        command_name = self._matched_command_name(command)
         if command in self._list_config("direct_menu_keywords", ["菜单", "帮助", "懒羊羊菜单"]):
             return await self._image_result(event, "懒羊羊菜单", self._menu_lines())
         if command in {"发言统计", "统计", "水群排行"}:
             return await self._speech_rank_result(event)
         if command in {"我的统计", "我水了多少"}:
             return await self._my_speech_result(event)
-        if command in {"邀请排行", "邀请榜"}:
+        if command in {"邀请排行", "邀请榜", "邀请统计"}:
             return await self._invite_rank_result(event)
         if command in {"今日老公", "抽老公"}:
             return await self._today_partner_result(event, "今日老公")
@@ -743,7 +838,227 @@ class LanYangYangGroupManager(Star):
             return await self._today_partner_result(event, "今日老婆")
         if command in {"今日小三", "抽小三"}:
             return await self._today_partner_result(event, "今日小三")
+        if not command_name:
+            return None
+
+        handlers = {
+            "菜单": lambda: self._image_result(event, "懒羊羊菜单", self._menu_lines()),
+            "帮助": lambda: self._image_result(event, "懒羊羊菜单", self._menu_lines()),
+            "懒羊羊菜单": lambda: self._image_result(event, "懒羊羊菜单", self._menu_lines()),
+            "发言统计": lambda: self._speech_rank_result(event),
+            "统计": lambda: self._speech_rank_result(event),
+            "水群排行": lambda: self._speech_rank_result(event),
+            "我的统计": lambda: self._my_speech_result(event),
+            "我水了多少": lambda: self._my_speech_result(event),
+            "邀请排行": lambda: self._invite_rank_result(event),
+            "邀请榜": lambda: self._invite_rank_result(event),
+            "邀请统计": lambda: self._invite_rank_result(event),
+            "今日老公": lambda: self._today_partner_result(event, "今日老公"),
+            "抽老公": lambda: self._today_partner_result(event, "今日老公"),
+            "今日老婆": lambda: self._today_partner_result(event, "今日老婆"),
+            "抽老婆": lambda: self._today_partner_result(event, "今日老婆"),
+            "今日小三": lambda: self._today_partner_result(event, "今日小三"),
+            "抽小三": lambda: self._today_partner_result(event, "今日小三"),
+            "语音": lambda: self._voice_result(event),
+            "懒羊羊语音": lambda: self._voice_result(event),
+            "发语音": lambda: self._voice_result(event),
+            "点歌": lambda: self._music_result(event),
+            "音乐": lambda: self._music_result(event),
+            "来首歌": lambda: self._music_result(event),
+            "禁言": lambda: self._mute_result(event),
+            "闭嘴": lambda: self._mute_result(event),
+            "安静": lambda: self._whole_ban_result(event, True),
+            "解禁": lambda: self._unmute_result(event),
+            "解除禁言": lambda: self._unmute_result(event),
+            "开启全禁": lambda: self._whole_ban_result(event, True),
+            "全禁": lambda: self._whole_ban_result(event, True),
+            "关闭全禁": lambda: self._whole_ban_result(event, False),
+            "解除全禁": lambda: self._whole_ban_result(event, False),
+            "撤回": lambda: self._recall_result(event),
+            "删": lambda: self._recall_result(event),
+            "批量撤回": lambda: self._batch_recall_result(event),
+            "批撤": lambda: self._batch_recall_result(event),
+            "踢出群": lambda: self._kick_impl(event, reject=False),
+            "踢出": lambda: self._kick_impl(event, reject=False),
+            "踢了": lambda: self._kick_impl(event, reject=False),
+            "踢": lambda: self._kick_impl(event, reject=False),
+            "踢黑": lambda: self._kick_impl(event, reject=True),
+            "拉黑踢出": lambda: self._kick_impl(event, reject=True),
+            "拉黑": lambda: self._kick_impl(event, reject=True),
+            "改名": lambda: self._set_card_result(event, self._extract_target_user(event), self._clean_command_text(event)),
+            "设置群名片": lambda: self._set_card_result(event, self._extract_target_user(event), self._clean_command_text(event)),
+            "改我": lambda: self._set_card_result(event, (str(event.get_sender_id()), event.get_sender_name()), self._clean_command_text(event)),
+            "头衔": lambda: self._set_title_result(event, self._extract_target_user(event), self._clean_command_text(event)),
+            "改头衔": lambda: self._set_title_result(event, self._extract_target_user(event), self._clean_command_text(event)),
+            "申请头衔": lambda: self._set_title_result(event, (str(event.get_sender_id()), event.get_sender_name()), self._clean_command_text(event)),
+            "上管": lambda: self._set_admin_result(event, True),
+            "授权": lambda: self._set_admin_result(event, True),
+            "发权": lambda: self._set_admin_result(event, True),
+            "下管": lambda: self._set_admin_result(event, False),
+            "白名单": lambda: self._whitelist_result(event, "auto"),
+            "查白": lambda: self._whitelist_result(event, "list"),
+            "查看白名单": lambda: self._whitelist_result(event, "list"),
+            "拉白": lambda: self._whitelist_result(event, "add"),
+            "加白": lambda: self._whitelist_result(event, "add"),
+            "加入白名单": lambda: self._whitelist_result(event, "add"),
+            "删白": lambda: self._whitelist_result(event, "remove"),
+            "移白": lambda: self._whitelist_result(event, "remove"),
+            "取消白名单": lambda: self._whitelist_result(event, "remove"),
+            "设精": lambda: self._essence_result(event, "set_essence_msg", "设精"),
+            "设置精华": lambda: self._essence_result(event, "set_essence_msg", "设精"),
+            "移精": lambda: self._essence_result(event, "delete_essence_msg", "移精"),
+            "移除精华": lambda: self._essence_result(event, "delete_essence_msg", "移精"),
+            "查看群精华": lambda: self._list_essence_result(event),
+            "设置群头像": lambda: self._set_group_portrait_result(event),
+            "设置群名": lambda: self._set_group_name_result(event),
+            "发布群公告": lambda: self._send_group_notice_result(event),
+            "查看群公告": lambda: self._get_group_notice_result(event),
+            "禁词禁言": lambda: self._set_group_setting_result(event, "禁词禁言", "banned_word_mute_seconds", self._extract_duration(event, 600)),
+            "设置禁词": lambda: self._set_banned_words_result(event),
+            "内置禁词": lambda: self._builtin_banned_words_result(event),
+            "刷屏禁言": lambda: self._set_group_setting_result(event, "刷屏禁言", "spam_mute_seconds", self._extract_duration(event, 0)),
+            "投票禁言": lambda: self._start_vote_mute(event),
+            "赞同禁言": lambda: self._vote_mute_result(event, True),
+            "反对禁言": lambda: self._vote_mute_result(event, False),
+            "开启宵禁": lambda: self._set_group_setting_result(event, "宵禁", "night_curfew", True),
+            "关闭宵禁": lambda: self._set_group_setting_result(event, "宵禁", "night_curfew", False),
+            "进群审核": lambda: self._set_group_setting_result(event, "进群审核", "join_approval", "开启" in command or "开" in command),
+        }
+        handler = handlers.get(command_name)
+        if handler:
+            return await handler()
         return None
+
+    async def _mute_result(self, event: AstrMessageEvent):
+        group_id = self._group_id(event)
+        target = self._extract_target_user(event)
+        duration = self._extract_duration(event, default_seconds=600)
+        if not group_id or not target:
+            return await self._image_result(event, "禁言", ["用法：禁言 @成员 10m"])
+        valid, validation_msg = await self._ensure_group_member(event, group_id, target)
+        if not valid:
+            return await self._image_result(event, "禁言结果", [validation_msg])
+        role_ok, role_msg = await self._ensure_role_action_allowed(event, group_id, target, "mute")
+        if not role_ok:
+            return await self._image_result(event, "禁言结果", [role_msg])
+        ok, msg = await self._onebot_call(
+            event,
+            "set_group_ban",
+            group_id=int(group_id),
+            user_id=int(target[0]),
+            duration=duration,
+        )
+        lines = [f"{target[1] or target[0]} 禁言 {self._human_duration(duration)}", msg]
+        return await self._image_result(event, "禁言结果", lines if ok else [msg])
+
+    async def _unmute_result(self, event: AstrMessageEvent):
+        group_id = self._group_id(event)
+        target = self._extract_target_user(event)
+        if not group_id or not target:
+            return await self._image_result(event, "解禁", ["用法：解禁 @成员"])
+        valid, validation_msg = await self._ensure_group_member(event, group_id, target)
+        if not valid:
+            return await self._image_result(event, "解禁结果", [validation_msg])
+        role_ok, role_msg = await self._ensure_role_action_allowed(event, group_id, target, "mute")
+        if not role_ok:
+            return await self._image_result(event, "解禁结果", [role_msg])
+        ok, msg = await self._onebot_call(
+            event,
+            "set_group_ban",
+            group_id=int(group_id),
+            user_id=int(target[0]),
+            duration=0,
+        )
+        return await self._image_result(
+            event, "解禁结果", [f"{target[1] or target[0]} 已解禁。", msg] if ok else [msg]
+        )
+
+    async def _recall_result(self, event: AstrMessageEvent):
+        message_id = self._extract_reply_message_id(event) or self._extract_first_number(event)
+        if not message_id:
+            return await self._image_result(event, "撤回", ["请回复要撤回的消息，或发送：撤回 消息ID"])
+        ok, msg = await self._onebot_call(event, "delete_msg", message_id=int(message_id))
+        return await self._image_result(event, "撤回结果", [msg if ok else f"撤回失败：{msg}"])
+
+    async def _batch_recall_result(self, event: AstrMessageEvent):
+        group_id = self._group_id(event)
+        if not group_id:
+            return await self._image_result(event, "批量撤回", ["这个功能要在群聊里用。"])
+        count = max(1, min(self._extract_count(event, default=5), 50))
+        target = self._extract_target_user(event)
+        ids = self._recent_message_ids(group_id, count, target[0] if target else None, event)
+        success = 0
+        errors = []
+        for msg_id in ids:
+            ok, msg = await self._onebot_call(event, "delete_msg", message_id=int(msg_id))
+            success += 1 if ok else 0
+            if not ok:
+                errors.append(msg)
+        lines = [f"目标：最近 {count} 条", f"成功撤回：{success} 条"]
+        if errors:
+            lines.append(f"失败：{errors[0]}")
+        return await self._image_result(event, "批量撤回结果", lines)
+
+    async def _list_essence_result(self, event: AstrMessageEvent):
+        group_id = self._group_id(event)
+        if not group_id:
+            return await self._image_result(event, "查看群精华", ["这个功能要在群聊里用。"])
+        ok, data = await self._onebot_call_raw(event, "get_essence_msg_list", group_id=int(group_id))
+        if not ok:
+            return await self._image_result(event, "查看群精华", [str(data)])
+        rows = data if isinstance(data, list) else []
+        lines = [f"共 {len(rows)} 条群精华。"] + [
+            f"{idx}. {row.get('sender_nick') or row.get('sender_id')}: {row.get('message_id')}"
+            for idx, row in enumerate(rows[:10], 1)
+        ]
+        return await self._image_result(event, "查看群精华", lines)
+
+    async def _set_group_portrait_result(self, event: AstrMessageEvent):
+        group_id = self._group_id(event)
+        image_url = self._extract_image_url(event)
+        if not group_id or not image_url:
+            return await self._image_result(event, "设置群头像", ["请带一张图片发送：设置群头像"])
+        ok, msg = await self._onebot_call(event, "set_group_portrait", group_id=int(group_id), file=image_url)
+        return await self._image_result(event, "设置群头像", [msg])
+
+    async def _set_group_name_result(self, event: AstrMessageEvent):
+        group_id = self._group_id(event)
+        name = self._clean_command_text(event)
+        if not group_id or not name:
+            return await self._image_result(event, "设置群名", ["用法：设置群名 新群名"])
+        ok, msg = await self._onebot_call(event, "set_group_name", group_id=int(group_id), group_name=name)
+        return await self._image_result(event, "设置群名", [msg])
+
+    async def _send_group_notice_result(self, event: AstrMessageEvent):
+        group_id = self._group_id(event)
+        content = self._clean_command_text(event)
+        if not group_id or not content:
+            return await self._image_result(event, "发布群公告", ["用法：发布群公告 内容"])
+        ok, msg = await self._onebot_call(event, "_send_group_notice", group_id=int(group_id), content=content)
+        return await self._image_result(event, "发布群公告", [msg])
+
+    async def _get_group_notice_result(self, event: AstrMessageEvent):
+        group_id = self._group_id(event)
+        if not group_id:
+            return await self._image_result(event, "查看群公告", ["这个功能要在群聊里用。"])
+        ok, data = await self._onebot_call_raw(event, "_get_group_notice", group_id=int(group_id))
+        if not ok:
+            return await self._image_result(event, "查看群公告", [str(data)])
+        rows = data if isinstance(data, list) else []
+        lines = [f"共 {len(rows)} 条公告。"] + [str(row.get("message") or row.get("content") or row)[:80] for row in rows[:5]]
+        return await self._image_result(event, "查看群公告", lines)
+
+    async def _set_banned_words_result(self, event: AstrMessageEvent):
+        words = [item.strip() for item in re.split(r"[，,\s]+", self._clean_command_text(event)) if item.strip()]
+        settings = self._group_settings(event)
+        settings["banned_words"] = words
+        self._save_stats()
+        return await self._image_result(event, "设置禁词", [f"已设置 {len(words)} 个禁词。", "为空时表示关闭自定义禁词。"])
+
+    async def _builtin_banned_words_result(self, event: AstrMessageEvent):
+        text = self._clean_command_text(event)
+        enable = not any(key in text for key in ("关", "关闭", "off", "0", "否"))
+        return await self._set_group_setting_result(event, "内置禁词", "builtin_banned_words", enable)
 
     async def _moderation_result(self, event: AstrMessageEvent, text: str):
         group_id = self._group_id(event)
@@ -778,6 +1093,13 @@ class LanYangYangGroupManager(Star):
     def _looks_like_command(self, text: str) -> bool:
         clean = text.strip().lstrip("/")
         return any(clean.startswith(name) for name in self._command_names())
+
+    def _matched_command_name(self, text: str) -> str | None:
+        clean = text.strip().lstrip("/")
+        for name in sorted(self._command_names(), key=len, reverse=True):
+            if clean == name or clean.startswith(name + " ") or clean.startswith(name + "\u3000"):
+                return name
+        return None
 
     async def _speech_rank_result(self, event: AstrMessageEvent):
         group_id = self._group_id(event)
@@ -907,8 +1229,9 @@ class LanYangYangGroupManager(Star):
     def _draw_menu_lines(self, draw: Any, box: tuple[int, int, int, int], lines: list[str], font: Any):
         x = box[0] + 28
         y = box[1] + 24
+        max_width = box[2] - x - 24
         for line in lines:
-            wrapped = self._wrap_text(line, max_chars=19)
+            wrapped = self._wrap_text_to_width(draw, line, font, max_width)
             for part in wrapped:
                 draw.text((x, y), part, font=font, fill="#6c3040")
                 y += 30
@@ -917,9 +1240,19 @@ class LanYangYangGroupManager(Star):
     def _render_reply_image(self, event: AstrMessageEvent, title: str, raw_lines: list[str]):
         width = 980
         line_height = 48
+        font_title = self._font(46, bold=True)
+        font_body = self._font(30, bold=True)
+        font_small = self._font(22)
+
+        probe = Image.new("RGBA", (1, 1))
+        probe_draw = ImageDraw.Draw(probe)
+        text_max_width = 548 - 110 - 28
         body_lines = []
         for line in raw_lines:
-            body_lines.extend(self._wrap_text(line, max_chars=22) or [""])
+            body_lines.extend(
+                self._wrap_text_to_width(probe_draw, line, font_body, text_max_width)
+                or [""]
+            )
         height = max(620, 320 + len(body_lines) * line_height)
 
         background = self._load_reply_background(width, height)
@@ -937,10 +1270,6 @@ class LanYangYangGroupManager(Star):
             self._draw_sheep_car(draw, 232, min(335, height - 190), scale=0.82)
             self._draw_mini_sheep(draw, 835, 110, scale=0.82)
 
-        font_title = self._font(46, bold=True)
-        font_body = self._font(30, bold=True)
-        font_small = self._font(22)
-
         title_x = 92 if background else 460
         draw.text((title_x, 70), title, font=font_title, fill="#7b2638", stroke_width=2, stroke_fill="#fff3cd")
         self._draw_sender_badge(img, draw, event, title_x, 122)
@@ -950,10 +1279,14 @@ class LanYangYangGroupManager(Star):
         box = (78, box_top, 548, box_bottom) if background else (430, box_top, 875, box_bottom)
         text_x = 110 if background else 462
         fill = (255, 254, 246, 228) if background else "#fffef6"
-        draw.rounded_rectangle(box, radius=28, fill=fill, outline="#efd27a", width=3)
+        if not background:
+            draw.rounded_rectangle(box, radius=28, fill=fill, outline="#efd27a", width=3)
         y = box_top + 26
         for line in body_lines:
-            draw.text((text_x, y), line, font=font_body, fill="#6c3040")
+            if background:
+                draw.text((text_x, y), line, font=font_body, fill="#6c3040", stroke_width=2, stroke_fill="#fff3cd")
+            else:
+                draw.text((text_x, y), line, font=font_body, fill="#6c3040")
             y += line_height
 
         draw.text((68, height - 62), "懒羊羊主题卡片回复", font=font_small, fill="#8f5a3b")
@@ -1165,6 +1498,24 @@ class LanYangYangGroupManager(Star):
             lines.append(current)
         return lines
 
+    def _wrap_text_to_width(self, draw: Any, text: str, font: Any, max_width: int) -> list[str]:
+        text = str(text)
+        if not text:
+            return [""]
+        lines: list[str] = []
+        current = ""
+        for char in text:
+            candidate = current + char
+            bbox = draw.textbbox((0, 0), candidate, font=font)
+            if current and bbox[2] - bbox[0] > max_width:
+                lines.append(current)
+                current = char
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return lines
+
     def _load_avatar(self, user_id: str):
         if not user_id:
             return None
@@ -1298,7 +1649,7 @@ class LanYangYangGroupManager(Star):
             return True, "操作完成。"
         except Exception as exc:
             logger.exception("OneBot API 调用失败：%s", action)
-            return False, str(exc)
+            return False, self._format_onebot_error(exc)
 
     async def _onebot_call_raw(self, event: AstrMessageEvent, action: str, **payload):
         if event.get_platform_name() != "aiocqhttp" or not hasattr(event, "bot"):
@@ -1307,7 +1658,71 @@ class LanYangYangGroupManager(Star):
             return True, await event.bot.api.call_action(action, **payload)
         except Exception as exc:
             logger.exception("OneBot API 调用失败：%s", action)
-            return False, str(exc)
+            return False, self._format_onebot_error(exc)
+
+    def _format_onebot_error(self, exc: Exception) -> str:
+        retcode = getattr(exc, "retcode", None)
+        wording = getattr(exc, "wording", None) or getattr(exc, "message", None)
+        text = str(wording or exc).strip()
+        if not text:
+            text = exc.__class__.__name__
+        if retcode:
+            return f"OneBot 返回失败：{text}（retcode={retcode}）"
+        return f"OneBot 返回失败：{text}"
+
+    async def _ensure_group_member(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        target: tuple[str, str],
+    ) -> tuple[bool, str]:
+        ok, info = await self._onebot_call_raw(
+            event,
+            "get_group_member_info",
+            group_id=int(group_id),
+            user_id=int(target[0]),
+            no_cache=True,
+        )
+        if ok:
+            nickname = ""
+            if isinstance(info, dict):
+                nickname = str(info.get("card") or info.get("nickname") or "")
+            display = nickname or target[1] or target[0]
+            return True, f"目标确认：{display}（{target[0]}）"
+        return False, (
+            f"QQ {target[0]} 不在本群，已停止执行，未进行群管操作。"
+            "请确认 QQ 号，或使用 @成员。"
+        )
+
+    async def _ensure_role_action_allowed(
+        self,
+        event: AstrMessageEvent,
+        group_id: str,
+        target: tuple[str, str],
+        action: str,
+    ) -> tuple[bool, str]:
+        ok, info = await self._onebot_call_raw(
+            event,
+            "get_group_member_info",
+            group_id=int(group_id),
+            user_id=int(target[0]),
+            no_cache=True,
+        )
+        if not ok or not isinstance(info, dict):
+            return False, (
+                f"无法确认 QQ {target[0]} 的群权限，已停止执行，未进行群管操作。"
+                "请确认目标仍在本群。"
+            )
+        role = str(info.get("role") or "")
+        display = str(info.get("card") or info.get("nickname") or target[1] or target[0])
+        if role == "owner":
+            action_name = {
+                "kick": "踢出/踢黑",
+                "mute": "禁言/解禁",
+                "admin": "上管/下管",
+            }.get(action, "群管")
+            return False, f"{display}（{target[0]}）是群主，不能执行{action_name}。"
+        return True, f"权限确认：{display}（{target[0]}）role={role or 'unknown'}"
 
     async def _send_onebot_message(self, event: AstrMessageEvent, message: str):
         group_id = self._group_id(event)
@@ -1459,6 +1874,65 @@ class LanYangYangGroupManager(Star):
         id_match = re.search(r"\b\d{3,20}\b", raw)
         return source, id_match.group(0) if id_match else None
 
+    def _extract_music_query(self, text: str, source: str) -> str:
+        query = re.sub(r"https?://\S+", " ", text or "")
+        query = re.sub(r"\b\d{3,20}\b", " ", query)
+        query = re.sub(r"\b(?:qq|QQ|163|netease)\b", " ", query)
+        query = query.replace("网易云音乐", " ").replace("网易云", " ").replace("网易", " ")
+        query = query.replace("QQ音乐", " ").replace("音乐", " ")
+        return re.sub(r"\s+", " ", query).strip()
+
+    async def _search_music_song(self, source: str, query: str) -> tuple[str, str, str, str] | None:
+        if not query:
+            return None
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._search_music_song_sync, source, query)
+
+    def _search_music_song_sync(self, source: str, query: str) -> tuple[str, str, str, str] | None:
+        search_order = [source] + [item for item in ("163", "qq") if item != source]
+        for item in search_order:
+            try:
+                result = self._search_netease_song(query) if item == "163" else self._search_qq_song(query)
+                if result:
+                    return result
+            except Exception:
+                logger.exception("搜索音乐失败：%s %s", item, query)
+        return None
+
+    def _search_netease_song(self, query: str) -> tuple[str, str, str, str] | None:
+        body = urlencode({"s": query, "type": "1", "limit": "5", "offset": "0"}).encode("utf-8")
+        req = Request(
+            "https://music.163.com/api/search/get/web",
+            data=body,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://music.163.com/search/",
+                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+            },
+        )
+        data = json.loads(urlopen(req, timeout=10).read().decode("utf-8"))
+        songs = data.get("result", {}).get("songs", [])
+        if not songs:
+            return None
+        song = songs[0]
+        artists = " / ".join(str(item.get("name") or "") for item in song.get("artists", []) if item.get("name"))
+        return "163", str(song.get("id")), str(song.get("name") or query), artists
+
+    def _search_qq_song(self, query: str) -> tuple[str, str, str, str] | None:
+        url = "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg?" + urlencode(
+            {"key": query, "format": "json", "inCharset": "utf8", "outCharset": "utf-8"}
+        )
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://y.qq.com/"})
+        data = json.loads(urlopen(req, timeout=10).read().decode("utf-8"))
+        songs = data.get("data", {}).get("song", {}).get("itemlist", [])
+        if not songs:
+            return None
+        song = songs[0]
+        song_id = str(song.get("mid") or song.get("id") or "")
+        if not song_id:
+            return None
+        return "qq", song_id, str(song.get("name") or query), str(song.get("singer") or "")
+
     def _recent_message_ids(
         self,
         group_id: str,
@@ -1518,6 +1992,7 @@ class LanYangYangGroupManager(Star):
             "我水了多少",
             "邀请排行",
             "邀请榜",
+            "邀请统计",
             "记邀请",
             "登记邀请",
             "语音",
@@ -1528,6 +2003,7 @@ class LanYangYangGroupManager(Star):
             "来首歌",
             "禁言",
             "闭嘴",
+            "安静",
             "禁我",
             "解禁",
             "解除禁言",
@@ -1553,6 +2029,8 @@ class LanYangYangGroupManager(Star):
             "拉黑踢出",
             "拉黑",
             "上管",
+            "授权",
+            "发权",
             "下管",
             "白名单",
             "查白",
@@ -1642,6 +2120,10 @@ class LanYangYangGroupManager(Star):
     def _is_text_only_chain(self, chain: list[Any]) -> bool:
         return all(item.__class__.__name__ == "Plain" for item in chain)
 
+    def _should_pass_to_other_plugin(self, text: str) -> bool:
+        command = text.strip().lstrip("/")
+        return command.startswith(("闲鱼", "voice_call", "VoiceCall"))
+
     def _component_text(self, item: Any) -> str:
         return str(getattr(item, "text", getattr(item, "message", "")) or "")
 
@@ -1649,7 +2131,7 @@ class LanYangYangGroupManager(Star):
         return [
             "菜单 / 发言统计 / 我的统计",
             "今日老公 / 今日老婆 / 今日小三",
-            "邀请排行 / 记邀请 @邀请人",
+            "邀请排行 / 邀请统计 / 记邀请 @邀请人",
             "点歌 qq 123456 / 语音 文件名",
             "禁言 <秒数> @群友 / 禁我 <秒数>",
             "解禁 @群友 / 开启全禁 / 关闭全禁",
