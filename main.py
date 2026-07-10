@@ -778,6 +778,15 @@ class LanYangYangGroupManager(Star):
         if not command_name:
             return None
 
+        # The no-wake-word listener below dispatches commands directly, so it
+        # does not pass through AstrBot's @permission_type decorators.  Keep
+        # every group-management action behind one authoritative permission
+        # check here instead of relying on individual command registrations.
+        if command_name in self._moderator_command_names():
+            allowed, permission_msg = await self._ensure_sender_can_moderate(event)
+            if not allowed:
+                return await self._image_result(event, "权限不足", [permission_msg])
+
         handlers = {
             "菜单": lambda: self._image_result(event, "懒羊羊菜单", self._menu_lines()),
             "帮助": lambda: self._image_result(event, "懒羊羊菜单", self._menu_lines()),
@@ -859,6 +868,41 @@ class LanYangYangGroupManager(Star):
         if handler:
             return await handler()
         return None
+
+    @staticmethod
+    def _moderator_command_names() -> set[str]:
+        """Commands that can change group state or another member's state."""
+        return {
+            "禁言", "闭嘴", "安静", "解禁", "解除禁言", "开启全禁", "全禁", "关闭全禁", "解除全禁",
+            "撤回", "删", "批量撤回", "批撤", "踢出群", "踢出", "踢了", "踢", "踢黑", "拉黑踢出", "拉黑",
+            "改名", "设置群名片", "头衔", "改头衔", "上管", "授权", "发权", "下管",
+            "白名单", "查白", "查看白名单", "拉白", "加白", "加入白名单", "删白", "移白", "取消白名单",
+            "设置群名", "发布群公告", "禁词禁言", "设置禁词", "刷屏禁言", "投票禁言",
+        }
+
+    async def _ensure_sender_can_moderate(self, event: AstrMessageEvent) -> tuple[bool, str]:
+        """Allow AstrBot admins and verified QQ group owners/admins only."""
+        if event.is_admin():
+            return True, "AstrBot 管理员授权。"
+
+        group_id = self._group_id(event)
+        sender_id = str(event.get_sender_id() or "")
+        if not group_id or not sender_id:
+            return False, "群管指令只能由本群群主、群管理员或 AstrBot 管理员使用。"
+
+        ok, info = await self._onebot_call_raw(
+            event,
+            "get_group_member_info",
+            group_id=int(group_id),
+            user_id=int(sender_id),
+            no_cache=True,
+        )
+        role = str(info.get("role") or "").lower() if ok and isinstance(info, dict) else ""
+        if role in {"owner", "admin"}:
+            return True, f"已验证 QQ 群权限：{role}。"
+        if not ok:
+            return False, "无法验证你的 QQ 群权限，已拒绝执行群管操作。"
+        return False, "仅本群群主、群管理员或 AstrBot 管理员可使用此群管指令。"
 
     async def _mute_result(self, event: AstrMessageEvent):
         group_id = self._group_id(event)
