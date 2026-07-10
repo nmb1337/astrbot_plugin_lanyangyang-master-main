@@ -56,7 +56,10 @@ class LanYangYangGroupManager(Star):
     async def initialize(self):
         logger.info("懒羊羊群管插件已加载。发送“菜单”可免唤醒查看命令。")
 
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
+    # Keep this listener behind purpose-built command plugins.  It only records
+    # statistics and handles LanYangYang's own no-prefix commands, so it must
+    # not claim unrelated plugin commands before they can process them.
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=-10)
     async def on_every_message(self, event: AstrMessageEvent):
         await self._record_message(event)
         await self._record_invite_from_raw(event)
@@ -426,6 +429,11 @@ class LanYangYangGroupManager(Star):
 
     @filter.on_decorating_result()
     async def decorate_text_reply(self, event: AstrMessageEvent):
+        # Do not transform another plugin's structured reply into a LanYangYang
+        # image card.  Those commands have their own response format and data
+        # side effects (for example check-in, lottery and NPC commands).
+        if self._should_pass_to_other_plugin((event.message_str or "").strip()):
+            return
         if not self._bool_config("convert_all_text_reply", True):
             return
         result = event.get_result()
@@ -2167,8 +2175,17 @@ class LanYangYangGroupManager(Star):
         return all(item.__class__.__name__ == "Plain" for item in chain)
 
     def _should_pass_to_other_plugin(self, text: str) -> bool:
-        command = text.strip().lstrip("/")
-        return command.startswith(("闲鱼", "voice_call", "VoiceCall"))
+        command = text.strip().lstrip("/!！")
+        return command.startswith(
+            (
+                # Other installed plugins with their own command contract.
+                "闲鱼", "voice_call", "VoiceCall",
+                # Zero community check-in plugin.
+                "签到", "买彩票", "称号", "当铺", "赞我",
+                # Scripted-NPC database plugin.
+                "打卡", "星币", "状态栏", "切换角色", "NPC信息", "物品栏", "抽奖", "中奖号码",
+            )
+        )
 
     def _component_text(self, item: Any) -> str:
         return str(getattr(item, "text", getattr(item, "message", "")) or "")
