@@ -37,7 +37,7 @@ PLUGIN_NAME = "astrbot_plugin_lanyangyang"
     "astrbot_plugin_lanyangyang",
     "Codex",
     "懒羊羊主题基础群管：发言统计、邀请排行、禁言、撤回、批量撤回、踢黑、白名单、点歌、图片回复与语音",
-    "1.1.0",
+    "1.1.1",
 )
 class LanYangYangGroupManager(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -95,16 +95,19 @@ class LanYangYangGroupManager(Star):
     async def today_husband(self, event: AstrMessageEvent):
         """抽取今日老公。"""
         yield await self._today_partner_result(event, "今日老公")
+        event.stop_event()
 
     @filter.command("今日老婆", alias={"抽老婆"})
     async def today_wife(self, event: AstrMessageEvent):
         """抽取今日老婆。"""
         yield await self._today_partner_result(event, "今日老婆")
+        event.stop_event()
 
     @filter.command("今日小三", alias={"抽小三"})
     async def today_affair(self, event: AstrMessageEvent):
         """抽取今日小三。"""
         yield await self._today_partner_result(event, "今日小三")
+        event.stop_event()
 
     @filter.command("发言统计", alias={"统计", "水群排行"})
     async def speech_rank(self, event: AstrMessageEvent):
@@ -126,6 +129,7 @@ class LanYangYangGroupManager(Star):
                 for idx, (uid, info) in enumerate(ranking, 1)
             ]
         yield await self._image_result(event, "本群发言排行", lines)
+        event.stop_event()
 
     @filter.command("我的统计", alias={"我水了多少"})
     async def my_speech(self, event: AstrMessageEvent):
@@ -144,6 +148,7 @@ class LanYangYangGroupManager(Star):
                 f"最近：{last}",
             ]
         yield await self._image_result(event, "我的发言统计", lines)
+        event.stop_event()
 
     @filter.command("邀请排行", alias={"邀请榜", "邀请统计"})
     async def invite_rank(self, event: AstrMessageEvent):
@@ -162,120 +167,71 @@ class LanYangYangGroupManager(Star):
                 for idx, (uid, info) in enumerate(ranking, 1)
             ]
         yield await self._image_result(event, "邀请排行", lines)
+        event.stop_event()
 
     @filter.command("语音", alias={"懒羊羊语音", "发语音"})
     async def voice(self, event: AstrMessageEvent):
         """主动发送 voices 目录里的语音。"""
         yield await self._voice_result(event)
+        event.stop_event()
 
     @filter.command("点歌", alias={"音乐", "来首歌"})
     async def music(self, event: AstrMessageEvent):
         """发送 QQ/网易云音乐卡片。"""
         yield await self._music_result(event)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
+    # AstrBot's PermissionType.ADMIN only represents users configured in
+    # ``admins_id``; it does not represent QQ's owner/admin roles.  Therefore
+    # every state-changing helper below performs the shared real-time OneBot
+    # role check itself, for both slash commands and the no-prefix dispatcher.
     @filter.command("禁言", alias={"闭嘴"})
     async def mute(self, event: AstrMessageEvent):
         """禁言群成员。"""
-        group_id = self._group_id(event)
-        target = self._extract_target_user(event)
-        duration = self._extract_duration(event, default_seconds=600)
-        if not group_id or not target:
-            yield await self._image_result(event, "禁言", ["用法：禁言 @成员 10m"])
-            return
-        valid, validation_msg = await self._ensure_group_member(event, group_id, target)
-        if not valid:
-            yield await self._image_result(event, "禁言结果", [validation_msg])
-            return
-        ok, msg = await self._onebot_call(
-            event,
-            "set_group_ban",
-            group_id=int(group_id),
-            user_id=int(target[0]),
-            duration=duration,
-        )
-        lines = [f"{target[1] or target[0]} 禁言 {self._human_duration(duration)}", msg]
-        yield await self._image_result(event, "禁言结果", lines if ok else [msg])
+        yield await self._mute_result(event)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("解禁", alias={"解除禁言"})
     async def unmute(self, event: AstrMessageEvent):
         """解除群成员禁言。"""
-        group_id = self._group_id(event)
-        target = self._extract_target_user(event)
-        if not group_id or not target:
-            yield await self._image_result(event, "解禁", ["用法：解禁 @成员"])
-            return
-        valid, validation_msg = await self._ensure_group_member(event, group_id, target)
-        if not valid:
-            yield await self._image_result(event, "解禁结果", [validation_msg])
-            return
-        ok, msg = await self._onebot_call(
-            event,
-            "set_group_ban",
-            group_id=int(group_id),
-            user_id=int(target[0]),
-            duration=0,
-        )
-        yield await self._image_result(
-            event, "解禁结果", [f"{target[1] or target[0]} 已解禁。", msg] if ok else [msg]
-        )
+        yield await self._unmute_result(event)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("撤回", alias={"删"})
     async def recall(self, event: AstrMessageEvent):
         """撤回一条消息，支持回复消息后发送“撤回”。"""
-        message_id = self._extract_reply_message_id(event) or self._extract_first_number(event)
-        if not message_id:
-            yield await self._image_result(event, "撤回", ["请回复要撤回的消息，或发送：撤回 消息ID"])
-            return
-        ok, msg = await self._onebot_call(event, "delete_msg", message_id=int(message_id))
-        yield await self._image_result(event, "撤回结果", [msg if ok else f"撤回失败：{msg}"])
+        yield await self._recall_result(event)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("批量撤回", alias={"批撤"})
     async def batch_recall(self, event: AstrMessageEvent):
         """批量撤回最近消息。"""
-        group_id = self._group_id(event)
-        if not group_id:
-            yield await self._image_result(event, "批量撤回", ["这个功能要在群聊里用。"])
-            return
-        count = max(1, min(self._extract_count(event, default=5), 50))
-        target = self._extract_target_user(event)
-        ids = self._recent_message_ids(group_id, count, target[0] if target else None, event)
-        success = 0
-        errors = []
-        for msg_id in ids:
-            ok, msg = await self._onebot_call(event, "delete_msg", message_id=int(msg_id))
-            success += 1 if ok else 0
-            if not ok:
-                errors.append(msg)
-        lines = [f"目标：最近 {count} 条", f"成功撤回：{success} 条"]
-        if errors:
-            lines.append(f"失败：{errors[0]}")
-        yield await self._image_result(event, "批量撤回结果", lines)
+        yield await self._batch_recall_result(event)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("踢出群", alias={"踢出", "踢", "踢了"})
     async def kick(self, event: AstrMessageEvent):
         """踢出群成员，不拉黑。"""
         yield await self._kick_impl(event, reject=False)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("踢黑", alias={"拉黑踢出", "拉黑"})
     async def kick_black(self, event: AstrMessageEvent):
         """踢出并拒绝再次加群。"""
         yield await self._kick_impl(event, reject=True)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("禁我")
     async def mute_me(self, event: AstrMessageEvent):
         """禁言自己。"""
+        yield await self._mute_self_result(event)
+        event.stop_event()
+
+    async def _mute_self_result(self, event: AstrMessageEvent):
         group_id = self._group_id(event)
         duration = self._extract_duration(event, default_seconds=600)
         if not group_id:
-            yield await self._image_result(event, "禁我", ["这个功能要在群聊里用。"])
-            return
+            return await self._image_result(event, "禁我", ["这个功能要在群聊里用。"])
         ok, msg = await self._onebot_call(
             event,
             "set_group_ban",
@@ -283,92 +239,92 @@ class LanYangYangGroupManager(Star):
             user_id=int(event.get_sender_id()),
             duration=duration,
         )
-        yield await self._image_result(event, "禁我结果", [f"禁言自己 {self._human_duration(duration)}", msg] if ok else [msg])
+        return await self._image_result(
+            event,
+            "禁我结果",
+            [f"禁言自己 {self._human_duration(duration)}", msg] if ok else [msg],
+        )
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("开启全禁", alias={"全禁"})
+    @filter.command("开启全禁", alias={"全禁", "安静"})
     async def whole_ban_on(self, event: AstrMessageEvent):
         yield await self._whole_ban_result(event, True)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("关闭全禁", alias={"解除全禁"})
     async def whole_ban_off(self, event: AstrMessageEvent):
         yield await self._whole_ban_result(event, False)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("改名", alias={"设置群名片"})
     async def set_member_card(self, event: AstrMessageEvent):
         target = self._extract_target_user(event)
         yield await self._set_card_result(event, target, self._clean_command_text(event, target))
+        event.stop_event()
 
     @filter.command("改我")
     async def set_my_card(self, event: AstrMessageEvent):
-        yield await self._set_card_result(event, (str(event.get_sender_id()), event.get_sender_name()), self._clean_command_text(event))
+        yield await self._set_card_result(
+            event,
+            (str(event.get_sender_id()), event.get_sender_name()),
+            self._clean_command_text(event),
+            allow_self=True,
+        )
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("头衔", alias={"改头衔"})
     async def set_special_title(self, event: AstrMessageEvent):
         target = self._extract_target_user(event)
         yield await self._set_title_result(event, target, self._clean_title_text(event, target))
+        event.stop_event()
 
     @filter.command("申请头衔")
     async def apply_special_title(self, event: AstrMessageEvent):
         target = (str(event.get_sender_id()), event.get_sender_name())
-        yield await self._set_title_result(event, target, self._clean_title_text(event, target))
+        yield await self._set_title_result(
+            event,
+            target,
+            self._clean_title_text(event, target),
+            allow_self=True,
+        )
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("上管")
+    @filter.command("上管", alias={"授权", "发权"})
     async def admin_on(self, event: AstrMessageEvent):
         yield await self._set_admin_result(event, True)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("下管")
     async def admin_off(self, event: AstrMessageEvent):
         yield await self._set_admin_result(event, False)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("白名单", alias={"查白", "查看白名单"})
     async def whitelist(self, event: AstrMessageEvent):
         """查看白名单，或发送 白名单 @成员 添加。"""
         yield await self._whitelist_result(event, "auto")
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("拉白", alias={"加白", "加入白名单"})
     async def whitelist_add(self, event: AstrMessageEvent):
         """加入自动处罚白名单。"""
         yield await self._whitelist_result(event, "add")
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("删白", alias={"移白", "取消白名单"})
     async def whitelist_remove(self, event: AstrMessageEvent):
         """移出自动处罚白名单。"""
         yield await self._whitelist_result(event, "remove")
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("设置群名")
     async def set_group_name(self, event: AstrMessageEvent):
-        group_id = self._group_id(event)
-        name = self._command_args(event).strip()
-        if not group_id or not name:
-            yield await self._image_result(event, "设置群名", ["用法：设置群名 新群名"])
-            return
-        ok, msg = await self._onebot_call(event, "set_group_name", group_id=int(group_id), group_name=name)
-        yield await self._image_result(event, "设置群名", [f"新群名：{name}", msg] if ok else [msg])
+        yield await self._set_group_name_result(event)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("发布群公告")
     async def send_group_notice(self, event: AstrMessageEvent):
-        group_id = self._group_id(event)
-        content = self._command_args(event).strip()
-        image = self._extract_image_url(event)
-        if not group_id or not content:
-            yield await self._image_result(event, "发布群公告", ["用法：发布群公告 公告内容，可同时带图"])
-            return
-        payload = {"group_id": int(group_id), "content": content}
-        if image:
-            payload["image"] = image
-        ok, msg = await self._onebot_call(event, "_send_group_notice", **payload)
-        yield await self._image_result(event, "发布群公告", [content, msg] if ok else [msg])
+        yield await self._send_group_notice_result(event)
+        event.stop_event()
 
     @filter.command("查看群公告")
     async def get_group_notice(self, event: AstrMessageEvent):
@@ -387,56 +343,50 @@ class LanYangYangGroupManager(Star):
             if isinstance(row, dict)
         ]
         yield await self._image_result(event, "查看群公告", lines)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("禁词禁言")
     async def banned_word_mute_seconds(self, event: AstrMessageEvent):
         yield await self._set_group_setting_result(event, "禁词禁言", "banned_word_mute_seconds", self._extract_duration(event, 600))
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("设置禁词")
     async def set_banned_words(self, event: AstrMessageEvent):
-        text = self._command_args(event).strip()
-        words = [item.strip() for item in re.split(r"[，,\s]+", text) if item.strip()]
-        settings = self._group_settings(event)
-        if text.startswith("+"):
-            settings["banned_words"] = sorted(set(settings.get("banned_words", [])) | set(word.lstrip("+") for word in words))
-        elif text.startswith("-"):
-            remove = {word.lstrip("-") for word in words}
-            settings["banned_words"] = [word for word in settings.get("banned_words", []) if word not in remove]
-        else:
-            settings["banned_words"] = words
-        self._save_stats()
-        yield await self._image_result(event, "设置禁词", [f"当前禁词：{'、'.join(settings.get('banned_words', [])) or '空'}"])
+        yield await self._set_banned_words_result(event)
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("刷屏禁言")
     async def spam_mute_seconds(self, event: AstrMessageEvent):
         yield await self._set_group_setting_result(event, "刷屏禁言", "spam_mute_seconds", self._extract_duration(event, 600))
+        event.stop_event()
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("投票禁言")
     async def vote_mute(self, event: AstrMessageEvent):
         yield await self._start_vote_mute(event)
+        event.stop_event()
 
     @filter.command("赞同禁言")
     async def vote_agree(self, event: AstrMessageEvent):
         yield await self._vote_mute_result(event, agree=True)
+        event.stop_event()
 
     @filter.command("反对禁言")
     async def vote_disagree(self, event: AstrMessageEvent):
         yield await self._vote_mute_result(event, agree=False)
+        event.stop_event()
 
     @filter.on_decorating_result()
     async def decorate_text_reply(self, event: AstrMessageEvent):
-        # Do not transform another plugin's structured reply into a LanYangYang
-        # image card.  Those commands have their own response format and data
-        # side effects (for example check-in, lottery and NPC commands).
-        if self._should_pass_to_other_plugin((event.message_str or "").strip()):
-            return
         if not self._bool_config("convert_all_text_reply", True):
             return
         result = event.get_result()
+        # This hook runs for every plugin result.  Converting every GENERAL_RESULT
+        # used to replace Zero, NPC and any newly installed plugin's deliberately
+        # formatted text with a LanYangYang card.  Only decorate AstrBot's actual
+        # model response; this plugin's own command replies already use
+        # ``_image_result`` and therefore do not need a global result rewrite.
+        if result is None or not result.is_llm_result():
+            return
         chain = getattr(result, "chain", None)
         if not chain or not self._is_text_only_chain(chain):
             return
@@ -447,6 +397,9 @@ class LanYangYangGroupManager(Star):
         result.chain = [Comp.Image.fromFileSystem(str(path))]
 
     async def _kick_impl(self, event: AstrMessageEvent, reject: bool):
+        denied = await self._moderator_denial(event, "踢出群")
+        if denied:
+            return denied
         group_id = self._group_id(event)
         target = self._extract_target_user(event)
         if not group_id or not target:
@@ -470,6 +423,9 @@ class LanYangYangGroupManager(Star):
         return await self._image_result(event, f"{action}结果", lines if ok else [msg])
 
     async def _whole_ban_result(self, event: AstrMessageEvent, enable: bool):
+        denied = await self._moderator_denial(event, "全体禁言")
+        if denied:
+            return denied
         group_id = self._group_id(event)
         if not group_id:
             return await self._image_result(event, "全体禁言", ["这个功能要在群聊里用。"])
@@ -477,10 +433,28 @@ class LanYangYangGroupManager(Star):
         title = "开启全禁" if enable else "关闭全禁"
         return await self._image_result(event, title, [msg])
 
-    async def _set_card_result(self, event: AstrMessageEvent, target: tuple[str, str] | None, card: str):
+    async def _set_card_result(
+        self,
+        event: AstrMessageEvent,
+        target: tuple[str, str] | None,
+        card: str,
+        allow_self: bool = False,
+    ):
+        is_self = bool(target and str(target[0]) == str(event.get_sender_id()))
+        if not (allow_self and is_self):
+            denied = await self._moderator_denial(event, "修改群名片")
+            if denied:
+                return denied
         group_id = self._group_id(event)
         if not group_id or not target or not card:
             return await self._image_result(event, "改名", ["用法：改名 新名 @群友，或 改我 新名"])
+        valid, validation_msg = await self._ensure_group_member(event, group_id, target)
+        if not valid:
+            return await self._image_result(event, "改名结果", [validation_msg])
+        if not is_self:
+            role_ok, role_msg = await self._ensure_role_action_allowed(event, group_id, target, "card")
+            if not role_ok:
+                return await self._image_result(event, "改名结果", [role_msg])
         ok, msg = await self._onebot_call(
             event,
             "set_group_card",
@@ -490,10 +464,28 @@ class LanYangYangGroupManager(Star):
         )
         return await self._image_result(event, "改名结果", [f"{target[1] or target[0]} -> {card}", msg] if ok else [msg])
 
-    async def _set_title_result(self, event: AstrMessageEvent, target: tuple[str, str] | None, title: str):
+    async def _set_title_result(
+        self,
+        event: AstrMessageEvent,
+        target: tuple[str, str] | None,
+        title: str,
+        allow_self: bool = False,
+    ):
+        is_self = bool(target and str(target[0]) == str(event.get_sender_id()))
+        if not (allow_self and is_self):
+            denied = await self._moderator_denial(event, "设置群头衔")
+            if denied:
+                return denied
         group_id = self._group_id(event)
         if not group_id or not target or not title:
             return await self._image_result(event, "头衔", ["用法：头衔 新头衔 @群友，或 申请头衔 新头衔"])
+        valid, validation_msg = await self._ensure_group_member(event, group_id, target)
+        if not valid:
+            return await self._image_result(event, "头衔结果", [validation_msg])
+        if not is_self:
+            role_ok, role_msg = await self._ensure_role_action_allowed(event, group_id, target, "title")
+            if not role_ok:
+                return await self._image_result(event, "头衔结果", [role_msg])
         title = title[:18].strip()
         ok, msg = await self._set_group_special_title(
             event,
@@ -509,6 +501,12 @@ class LanYangYangGroupManager(Star):
         return await self._image_result(event, "头衔结果", [f"{target[1] or target[0]}：{title}", msg] if ok else [msg])
 
     async def _set_admin_result(self, event: AstrMessageEvent, enable: bool):
+        # QQ only permits the group owner to grant/revoke administrators.  An
+        # AstrBot administrator is also trusted because it is an explicit bot
+        # control-plane role and the OneBot side still enforces the bot's role.
+        denied = await self._moderator_denial(event, "群管理员设置", require_owner=True)
+        if denied:
+            return denied
         group_id = self._group_id(event)
         target = self._extract_target_user(event)
         if not group_id or not target:
@@ -532,6 +530,9 @@ class LanYangYangGroupManager(Star):
         return await self._image_result(event, f"{title}结果", [f"{target[1] or target[0]}", msg] if ok else [msg])
 
     async def _whitelist_result(self, event: AstrMessageEvent, mode: str):
+        denied = await self._moderator_denial(event, "白名单")
+        if denied:
+            return denied
         group_id = self._group_id(event)
         if not group_id:
             return await self._image_result(event, "白名单", ["这个功能要在群聊里用。"])
@@ -573,6 +574,9 @@ class LanYangYangGroupManager(Star):
         return await self._image_result(event, "拉白", [f"已加入白名单：{name or uid}", "禁词、刷屏、宵禁自动处罚会跳过此人。"])
 
     async def _essence_result(self, event: AstrMessageEvent, action: str, title: str):
+        denied = await self._moderator_denial(event, title)
+        if denied:
+            return denied
         message_id = self._extract_reply_message_id(event) or self._extract_first_number(event)
         if not message_id:
             return await self._image_result(event, title, [f"请回复消息后发送：{title}"])
@@ -580,6 +584,9 @@ class LanYangYangGroupManager(Star):
         return await self._image_result(event, f"{title}结果", [msg])
 
     async def _set_group_setting_result(self, event: AstrMessageEvent, title: str, key: str, value: Any):
+        denied = await self._moderator_denial(event, title)
+        if denied:
+            return denied
         settings = self._group_settings(event)
         settings[key] = value
         self._save_stats()
@@ -592,11 +599,20 @@ class LanYangYangGroupManager(Star):
         return await self._image_result(event, title, [f"已设置：{value_text}"])
 
     async def _start_vote_mute(self, event: AstrMessageEvent):
+        denied = await self._moderator_denial(event, "投票禁言")
+        if denied:
+            return denied
         group_id = self._group_id(event)
         target = self._extract_target_user(event)
         duration = self._extract_duration(event, 600)
         if not group_id or not target:
             return await self._image_result(event, "投票禁言", ["用法：投票禁言 <秒数> @群友"])
+        valid, validation_msg = await self._ensure_group_member(event, group_id, target)
+        if not valid:
+            return await self._image_result(event, "投票禁言", [validation_msg])
+        role_ok, role_msg = await self._ensure_role_action_allowed(event, group_id, target, "mute")
+        if not role_ok:
+            return await self._image_result(event, "投票禁言", [role_msg])
         votes = self.stats.setdefault("votes", {})
         votes[group_id] = {
             "target": target[0],
@@ -786,15 +802,6 @@ class LanYangYangGroupManager(Star):
         if not command_name:
             return None
 
-        # The no-wake-word listener below dispatches commands directly, so it
-        # does not pass through AstrBot's @permission_type decorators.  Keep
-        # every group-management action behind one authoritative permission
-        # check here instead of relying on individual command registrations.
-        if command_name in self._moderator_command_names():
-            allowed, permission_msg = await self._ensure_sender_can_moderate(event)
-            if not allowed:
-                return await self._image_result(event, "权限不足", [permission_msg])
-
         handlers = {
             "菜单": lambda: self._image_result(event, "懒羊羊菜单", self._menu_lines()),
             "帮助": lambda: self._image_result(event, "懒羊羊菜单", self._menu_lines()),
@@ -822,6 +829,7 @@ class LanYangYangGroupManager(Star):
             "禁言": lambda: self._mute_result(event),
             "闭嘴": lambda: self._mute_result(event),
             "安静": lambda: self._whole_ban_result(event, True),
+            "禁我": lambda: self._mute_self_result(event),
             "解禁": lambda: self._unmute_result(event),
             "解除禁言": lambda: self._unmute_result(event),
             "开启全禁": lambda: self._whole_ban_result(event, True),
@@ -841,13 +849,19 @@ class LanYangYangGroupManager(Star):
             "拉黑": lambda: self._kick_impl(event, reject=True),
             "改名": lambda: self._set_card_direct(event),
             "设置群名片": lambda: self._set_card_direct(event),
-            "改我": lambda: self._set_card_result(event, (str(event.get_sender_id()), event.get_sender_name()), self._clean_command_text(event)),
+            "改我": lambda: self._set_card_result(
+                event,
+                (str(event.get_sender_id()), event.get_sender_name()),
+                self._clean_command_text(event),
+                allow_self=True,
+            ),
             "头衔": lambda: self._set_title_direct(event),
             "改头衔": lambda: self._set_title_direct(event),
             "申请头衔": lambda: self._set_title_result(
                 event,
                 (str(event.get_sender_id()), event.get_sender_name()),
                 self._clean_title_text(event, (str(event.get_sender_id()), event.get_sender_name())),
+                allow_self=True,
             ),
             "上管": lambda: self._set_admin_result(event, True),
             "授权": lambda: self._set_admin_result(event, True),
@@ -888,7 +902,26 @@ class LanYangYangGroupManager(Star):
             "设置群名", "发布群公告", "禁词禁言", "设置禁词", "刷屏禁言", "投票禁言",
         }
 
-    async def _ensure_sender_can_moderate(self, event: AstrMessageEvent) -> tuple[bool, str]:
+    async def _moderator_denial(
+        self,
+        event: AstrMessageEvent,
+        title: str,
+        require_owner: bool = False,
+    ):
+        """Return a denial card, or ``None`` when the sender is authorized."""
+        allowed, permission_msg = await self._ensure_sender_can_moderate(
+            event,
+            require_owner=require_owner,
+        )
+        if allowed:
+            return None
+        return await self._image_result(event, f"{title}：权限不足", [permission_msg])
+
+    async def _ensure_sender_can_moderate(
+        self,
+        event: AstrMessageEvent,
+        require_owner: bool = False,
+    ) -> tuple[bool, str]:
         """Allow AstrBot admins and verified QQ group owners/admins only."""
         if event.is_admin():
             return True, "AstrBot 管理员授权。"
@@ -906,13 +939,19 @@ class LanYangYangGroupManager(Star):
             no_cache=True,
         )
         role = str(info.get("role") or "").lower() if ok and isinstance(info, dict) else ""
-        if role in {"owner", "admin"}:
+        allowed_roles = {"owner"} if require_owner else {"owner", "admin"}
+        if role in allowed_roles:
             return True, f"已验证 QQ 群权限：{role}。"
         if not ok:
             return False, "无法验证你的 QQ 群权限，已拒绝执行群管操作。"
+        if require_owner:
+            return False, "此操作只能由本群群主或 AstrBot 管理员使用。"
         return False, "仅本群群主、群管理员或 AstrBot 管理员可使用此群管指令。"
 
     async def _mute_result(self, event: AstrMessageEvent):
+        denied = await self._moderator_denial(event, "禁言")
+        if denied:
+            return denied
         group_id = self._group_id(event)
         target = self._extract_target_user(event)
         duration = self._extract_duration(event, default_seconds=600)
@@ -943,6 +982,9 @@ class LanYangYangGroupManager(Star):
         return await self._set_title_result(event, target, self._clean_title_text(event, target))
 
     async def _unmute_result(self, event: AstrMessageEvent):
+        denied = await self._moderator_denial(event, "解禁")
+        if denied:
+            return denied
         group_id = self._group_id(event)
         target = self._extract_target_user(event)
         if not group_id or not target:
@@ -965,6 +1007,9 @@ class LanYangYangGroupManager(Star):
         )
 
     async def _recall_result(self, event: AstrMessageEvent):
+        denied = await self._moderator_denial(event, "撤回")
+        if denied:
+            return denied
         message_id = self._extract_reply_message_id(event) or self._extract_first_number(event)
         if not message_id:
             return await self._image_result(event, "撤回", ["请回复要撤回的消息，或发送：撤回 消息ID"])
@@ -972,6 +1017,9 @@ class LanYangYangGroupManager(Star):
         return await self._image_result(event, "撤回结果", [msg if ok else f"撤回失败：{msg}"])
 
     async def _batch_recall_result(self, event: AstrMessageEvent):
+        denied = await self._moderator_denial(event, "批量撤回")
+        if denied:
+            return denied
         group_id = self._group_id(event)
         if not group_id:
             return await self._image_result(event, "批量撤回", ["这个功能要在群聊里用。"])
@@ -991,6 +1039,9 @@ class LanYangYangGroupManager(Star):
         return await self._image_result(event, "批量撤回结果", lines)
 
     async def _set_group_name_result(self, event: AstrMessageEvent):
+        denied = await self._moderator_denial(event, "设置群名")
+        if denied:
+            return denied
         group_id = self._group_id(event)
         name = self._clean_command_text(event)
         if not group_id or not name:
@@ -999,11 +1050,18 @@ class LanYangYangGroupManager(Star):
         return await self._image_result(event, "设置群名", [msg])
 
     async def _send_group_notice_result(self, event: AstrMessageEvent):
+        denied = await self._moderator_denial(event, "发布群公告")
+        if denied:
+            return denied
         group_id = self._group_id(event)
         content = self._clean_command_text(event)
         if not group_id or not content:
-            return await self._image_result(event, "发布群公告", ["用法：发布群公告 内容"])
-        ok, msg = await self._onebot_call(event, "_send_group_notice", group_id=int(group_id), content=content)
+            return await self._image_result(event, "发布群公告", ["用法：发布群公告 内容，可同时带图"])
+        payload = {"group_id": int(group_id), "content": content}
+        image = self._extract_image_url(event)
+        if image:
+            payload["image"] = image
+        ok, msg = await self._onebot_call(event, "_send_group_notice", **payload)
         return await self._image_result(event, "发布群公告", [msg])
 
     async def _get_group_notice_result(self, event: AstrMessageEvent):
@@ -1018,11 +1076,29 @@ class LanYangYangGroupManager(Star):
         return await self._image_result(event, "查看群公告", lines)
 
     async def _set_banned_words_result(self, event: AstrMessageEvent):
-        words = [item.strip() for item in re.split(r"[，,\s]+", self._clean_command_text(event)) if item.strip()]
+        denied = await self._moderator_denial(event, "设置禁词")
+        if denied:
+            return denied
+        text = self._clean_command_text(event)
+        words = [item.strip() for item in re.split(r"[，,\s]+", text) if item.strip()]
         settings = self._group_settings(event)
-        settings["banned_words"] = words
+        if text.startswith("+"):
+            additions = {word.lstrip("+") for word in words if word.lstrip("+")}
+            settings["banned_words"] = sorted(set(settings.get("banned_words", [])) | additions)
+        elif text.startswith("-"):
+            remove = {word.lstrip("-") for word in words if word.lstrip("-")}
+            settings["banned_words"] = [
+                word for word in settings.get("banned_words", []) if word not in remove
+            ]
+        else:
+            settings["banned_words"] = words
         self._save_stats()
-        return await self._image_result(event, "设置禁词", [f"已设置 {len(words)} 个禁词。", "为空时表示关闭自定义禁词。"])
+        current = settings.get("banned_words", [])
+        return await self._image_result(
+            event,
+            "设置禁词",
+            [f"当前禁词：{'、'.join(current) or '空'}", "为空时表示关闭自定义禁词。"],
+        )
 
     async def _moderation_result(self, event: AstrMessageEvent, text: str):
         group_id = self._group_id(event)
@@ -1745,15 +1821,37 @@ class LanYangYangGroupManager(Star):
                 f"无法确认 QQ {target[0]} 的群权限，已停止执行，未进行群管操作。"
                 "请确认目标仍在本群。"
             )
-        role = str(info.get("role") or "")
+        role = str(info.get("role") or "").lower()
         display = str(info.get("card") or info.get("nickname") or target[1] or target[0])
         if role == "owner":
             action_name = {
                 "kick": "踢出/踢黑",
                 "mute": "禁言/解禁",
                 "admin": "上管/下管",
+                "card": "修改群名片",
+                "title": "设置群头衔",
             }.get(action, "群管")
             return False, f"{display}（{target[0]}）是群主，不能执行{action_name}。"
+
+        # An AstrBot administrator is an explicitly trusted bot operator.  QQ
+        # group administrators, however, must not be able to borrow an owner
+        # bot's authority to act on peers or grant/revoke administrator roles.
+        if not event.is_admin():
+            sender_id = str(event.get_sender_id() or "")
+            sender_ok, sender_info = await self._onebot_call_raw(
+                event,
+                "get_group_member_info",
+                group_id=int(group_id),
+                user_id=int(sender_id),
+                no_cache=True,
+            )
+            if not sender_ok or not isinstance(sender_info, dict):
+                return False, "无法回查操作者的群权限，已停止执行。"
+            sender_role = str(sender_info.get("role") or "").lower()
+            if action == "admin" and sender_role != "owner":
+                return False, "上管/下管只能由本群群主或 AstrBot 管理员执行。"
+            if sender_role == "admin" and role == "admin":
+                return False, f"群管理员不能对同级管理员 {display}（{target[0]}）执行此操作。"
         return True, f"权限确认：{display}（{target[0]}）role={role or 'unknown'}"
 
     async def _send_onebot_message(self, event: AstrMessageEvent, message: str):

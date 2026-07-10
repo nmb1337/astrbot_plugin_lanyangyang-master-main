@@ -1,6 +1,6 @@
 {
   "convert_all_text_reply": {
-    "description": "将普通文本回复自动转换为懒羊羊主题图片",
+    "description": "将 AstrBot 的 AI 纯文本回复转换为懒羊羊主题图片（不会修改其他插件回复）",
     "type": "bool",
     "default": true
   },
